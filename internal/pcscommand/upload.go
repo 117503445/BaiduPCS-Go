@@ -14,6 +14,7 @@ import (
 	"github.com/iikira/BaiduPCS-Go/pcsutil/converter"
 	"github.com/iikira/BaiduPCS-Go/requester/rio"
 	"github.com/iikira/BaiduPCS-Go/requester/uploader"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -33,6 +34,7 @@ type (
 		MaxRetry       int
 		NotRapidUpload bool
 		NotSplitFile   bool // 禁用分片上传
+		Out 		   io.Writer
 	}
 
 	// StepUpload 上传步骤
@@ -104,14 +106,18 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 		opt.MaxRetry = DefaultUploadMaxRetry
 	}
 
+	if opt.Out == nil {
+		opt.Out = os.Stdout
+	}
+
 	err := matchPathByShellPatternOnce(&savePath)
 	if err != nil {
-		fmt.Printf("警告: 上传文件, 获取网盘路径 %s 错误, %s\n", savePath, err)
+		fmt.Fprintf(opt.Out,"警告: 上传文件, 获取网盘路径 %s 错误, %s\n", savePath, err)
 	}
 
 	switch len(localPaths) {
 	case 0:
-		fmt.Printf("本地路径为空\n")
+		fmt.Fprintf(opt.Out,"本地路径为空\n")
 		return
 	}
 
@@ -125,7 +131,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 	for k := range localPaths {
 		walkedFiles, err := pcsutil.WalkDir(localPaths[k], "")
 		if err != nil {
-			fmt.Printf("警告: 遍历错误: %s\n", err)
+			fmt.Fprintf(opt.Out,"警告: 遍历错误: %s\n", err)
 			continue
 		}
 
@@ -156,18 +162,18 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 				savePath:          path.Clean(savePath + baidupcs.PathSeparator + subSavePath),
 			})
 
-			fmt.Printf("[%d] 加入上传队列: %s\n", lastID, walkedFiles[k3])
+			fmt.Fprintf(opt.Out,"[%d] 加入上传队列: %s\n", lastID, walkedFiles[k3])
 		}
 	}
 
 	if lastID == 0 {
-		fmt.Printf("未检测到上传的文件.\n")
+		fmt.Fprintf(opt.Out,"未检测到上传的文件.\n")
 		return
 	}
 
 	uploadDatabase, err := pcsupload.NewUploadingDatabase()
 	if err != nil {
-		fmt.Printf("打开上传未完成数据库错误: %s\n", err)
+		fmt.Fprintf(opt.Out,"打开上传未完成数据库错误: %s\n", err)
 		return
 	}
 	defer uploadDatabase.Close()
@@ -190,12 +196,12 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 				case 31200: //[Method:Insert][Error:Insert Request Forbid]
 				// do nothing, continue
 				default:
-					fmt.Printf("[%d] %s, %s\n", task.ID, errManifest, pcsError)
+					fmt.Fprintf(opt.Out,"[%d] %s, %s\n", task.ID, errManifest, pcsError)
 					return
 				}
 			case pcserror.ErrTypeNetError:
 				if strings.Contains(pcsError.GetError().Error(), "413 Request Entity Too Large") {
-					fmt.Printf("[%d] %s, %s\n", task.ID, errManifest, pcsError)
+					fmt.Fprintf(opt.Out,"[%d] %s, %s\n", task.ID, errManifest, pcsError)
 					return
 				}
 			}
@@ -203,12 +209,12 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 			// 未达到失败重试最大次数, 将任务推送到队列末尾
 			if task.retry < task.MaxRetry {
 				task.retry++
-				fmt.Printf("[%d] %s, %s, 重试 %d/%d\n", task.ID, errManifest, pcsError, task.retry, task.MaxRetry)
+				fmt.Fprintf(opt.Out,"[%d] %s, %s, 重试 %d/%d\n", task.ID, errManifest, pcsError, task.retry, task.MaxRetry)
 				ulist.PushBack(task)
 				time.Sleep(3 * time.Duration(task.retry) * time.Second)
 			} else {
 				// on failed
-				fmt.Printf("[%d] %s, %s\n", task.ID, errManifest, pcsError)
+				fmt.Fprintf(opt.Out,"[%d] %s, %s\n", task.ID, errManifest, pcsError)
 			}
 		}
 		totalSize int64
@@ -225,11 +231,11 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 		task := e.Value.(*utask)
 
 		func() {
-			fmt.Printf("[%d] 准备上传: %s\n", task.ID, task.localFileChecksum.Path)
+			fmt.Fprintf(opt.Out,"[%d] 准备上传: %s\n", task.ID, task.localFileChecksum.Path)
 
 			err = task.localFileChecksum.OpenPath()
 			if err != nil {
-				fmt.Printf("[%d] 文件不可读, 错误信息: %s, 跳过...\n", task.ID, err)
+				fmt.Fprintf(opt.Out,"[%d] 文件不可读, 错误信息: %s, 跳过...\n", task.ID, err)
 				return
 			}
 			defer task.localFileChecksum.Close() // 关闭文件
@@ -252,7 +258,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 			}
 
 			if task.localFileChecksum.Length > baidupcs.MaxRapidUploadSize {
-				fmt.Printf("[%d] 文件超过20GB, 无法使用秒传功能, 跳过秒传...\n", task.ID)
+				fmt.Fprintf(opt.Out,"[%d] 文件超过20GB, 无法使用秒传功能, 跳过秒传...\n", task.ID)
 				task.step = StepUploadUpload
 				goto stepControl
 			}
@@ -276,13 +282,13 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 					case pcserror.ErrTypeRemoteError:
 						// do nothing
 					default:
-						fmt.Printf("获取文件列表错误, %s\n", pcsError)
+						fmt.Fprintf(opt.Out,"获取文件列表错误, %s\n", pcsError)
 						return
 					}
 				}
 
 				if task.localFileChecksum.Length >= 128*converter.MB {
-					fmt.Printf("[%d] 检测秒传中, 请稍候...\n", task.ID)
+					fmt.Fprintf(opt.Out,"[%d] 检测秒传中, 请稍候...\n", task.ID)
 				}
 
 				// 经测试, 文件的 crc32 值并非秒传文件所必需
@@ -294,7 +300,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 						if fd.Filename == panFile {
 							decodedMD5, _ := hex.DecodeString(fd.MD5)
 							if bytes.Compare(decodedMD5, task.localFileChecksum.MD5) == 0 {
-								fmt.Printf("[%d] 目标文件, %s, 已存在, 跳过...\n", task.ID, task.savePath)
+								fmt.Fprintf(opt.Out,"[%d] 目标文件, %s, 已存在, 跳过...\n", task.ID, task.savePath)
 								return
 							}
 						}
@@ -303,7 +309,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 
 				pcsError = pcs.RapidUpload(task.savePath, hex.EncodeToString(task.localFileChecksum.MD5), hex.EncodeToString(task.localFileChecksum.SliceMD5), fmt.Sprint(task.localFileChecksum.CRC32), task.localFileChecksum.Length)
 				if pcsError == nil {
-					fmt.Printf("[%d] 秒传成功, 保存到网盘路径: %s\n\n", task.ID, task.savePath)
+					fmt.Fprintf(opt.Out,"[%d] 秒传成功, 保存到网盘路径: %s\n\n", task.ID, task.savePath)
 					totalSize += task.localFileChecksum.Length
 					return
 				}
@@ -314,13 +320,13 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 				case pcserror.ErrTypeRemoteError:
 					switch pcsError.GetRemoteErrCode() {
 					case 31112: //exceed quota
-						fmt.Printf("[%d] 秒传失败, 超出配额, 网盘容量已满\n\n", task.ID)
+						fmt.Fprintf(opt.Out,"[%d] 秒传失败, 超出配额, 网盘容量已满\n\n", task.ID)
 						return
 					}
 				}
 			}
 
-			fmt.Printf("[%d] 秒传失败, 开始上传文件...\n\n", task.ID)
+			fmt.Fprintf(opt.Out,"[%d] 秒传失败, 开始上传文件...\n\n", task.ID)
 
 			// 保存秒传信息
 			uploadDatabase.UpdateUploading(&task.localFileChecksum.LocalFileMeta, nil)
@@ -357,7 +363,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 					default:
 					}
 
-					fmt.Printf("\r[%d] ↑ %s/%s %s/s in %s ............", task.ID,
+					fmt.Fprintf(opt.Out,"\r[%d] ↑ %s/%s %s/s in %s ............", task.ID,
 						converter.ConvertFileSize(status.Uploaded(), 2),
 						converter.ConvertFileSize(status.TotalSize(), 2),
 						converter.ConvertFileSize(status.SpeedsPerSecond(), 2),
@@ -366,8 +372,8 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 				})
 				muer.OnSuccess(func() {
 					close(exitChan)
-					fmt.Printf("\n")
-					fmt.Printf("[%d] 上传文件成功, 保存到网盘路径: %s\n", task.ID, task.savePath)
+					fmt.Fprintf(opt.Out,"\n")
+					fmt.Fprintf(opt.Out,"[%d] 上传文件成功, 保存到网盘路径: %s\n", task.ID, task.savePath)
 					totalSize += task.localFileChecksum.Length
 					uploadDatabase.Delete(&task.localFileChecksum.LocalFileMeta) // 删除
 					uploadDatabase.Save()
@@ -376,7 +382,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 					close(exitChan)
 					pcsError, ok := err.(pcserror.Error)
 					if !ok {
-						fmt.Printf("[%d] 上传文件错误: %s\n", task.ID, err)
+						fmt.Fprintf(opt.Out,"[%d] 上传文件错误: %s\n", task.ID, err)
 						return
 					}
 
@@ -384,7 +390,7 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 					case 31363: // block miss in superfile2, 上传状态过期
 						uploadDatabase.Delete(&task.localFileChecksum.LocalFileMeta)
 						uploadDatabase.Save()
-						fmt.Printf("[%d] 上传文件错误: 上传状态过期, 请重新上传\n", task.ID)
+						fmt.Fprintf(opt.Out,"[%d] 上传文件错误: 上传状态过期, 请重新上传\n", task.ID)
 						return
 					}
 
@@ -396,8 +402,8 @@ func RunUpload(localPaths []string, savePath string, opt *UploadOptions) {
 		}()
 	}
 
-	fmt.Printf("\n")
-	fmt.Printf("全部上传完毕, 总大小: %s\n", converter.ConvertFileSize(totalSize))
+	fmt.Fprintf(opt.Out,"\n")
+	fmt.Fprintf(opt.Out,"全部上传完毕, 总大小: %s\n", converter.ConvertFileSize(totalSize))
 }
 
 func getBlockSize(fileSize int64) int64 {
